@@ -10,6 +10,25 @@ const TRUE_FALSE_OPTIONS = {
   b: 'False',
 };
 
+function getCardSignature(card) {
+  const normalize = (value) =>
+    String(value ?? '')
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g, ' ');
+
+  return JSON.stringify({
+    type: card.type,
+    question: normalize(card.question),
+    term: normalize(card.term),
+    definition: normalize(card.definition),
+    correctAnswer: normalize(card.correctAnswer),
+    options: Object.entries(card.options || {})
+      .map(([key, value]) => [normalize(key), normalize(value)])
+      .sort(([a], [b]) => a.localeCompare(b)),
+  });
+}
+
 // Convert a True/False answer to our standard a/b format.
 function trueFalseLetter(card) {
   const value = String(card.correctAnswer ?? '').toLowerCase();
@@ -201,6 +220,8 @@ function Flashcards() {
   const [editForm, setEditForm] = useState(null);
   const [createForm, setCreateForm] = useState(null);
   const [jumpQuestion, setJumpQuestion] = useState('');
+  const [importMode, setImportMode] = useState('merge');
+  const [importStatus, setImportStatus] = useState('');
 
   const touchStart = useRef(null);
 
@@ -211,8 +232,13 @@ function Flashcards() {
   // ------------------------------------
 
   const importQuestions = async (event) => {
-    const file = event.target.files?.[0];
+    const input = event.target;
+    const file = input.files?.[0];
+
     if (!file) return;
+
+    setError('');
+    setImportStatus('');
 
     try {
       const data = JSON.parse(await file.text());
@@ -221,19 +247,163 @@ function Flashcards() {
         throw new Error('JSON must contain an array of questions.');
       }
 
-      const sorted = [...data].sort((a, b) => Number(a.id) - Number(b.id));
+      // Validate imported records.
+      const imported = data.map((item, i) => {
+        const id = Number(item?.id);
 
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(sorted));
+        if (
+          !item ||
+          typeof item !== 'object' ||
+          Array.isArray(item) ||
+          !Number.isSafeInteger(id) ||
+          id < 1 ||
+          !['definition', 'multiple_choice', 'true_false'].includes(item.type)
+        ) {
+          throw new Error(`Invalid question at position ${i + 1}.`);
+        }
 
-      setCards(sorted);
-      setIndex(0);
-      setShowAnswer(false);
-      setError('');
+        return { ...item, id };
+      });
+
+      // Remove duplicate IDs inside the imported file.
+      const fileIds = new Set();
+      const uniqueImported = [];
+      let fileDuplicates = 0;
+
+      for (const item of imported) {
+        if (fileIds.has(item.id)) {
+          fileDuplicates++;
+          continue;
+        }
+
+        fileIds.add(item.id);
+        uniqueImported.push(item);
+      }
+
+      // --------------------------------
+      // MERGE QUESTIONS
+      // --------------------------------
+
+      if (importMode === 'merge') {
+        const existingIds = new Set(cards.map((card) => Number(card.id)));
+
+        const existingSignatures = new Set(cards.map(getCardSignature));
+
+        const newCards = [];
+
+        let skippedIds = 0;
+        let skippedContent = 0;
+
+        for (const item of uniqueImported) {
+          // Never overwrite an existing ID.
+          if (existingIds.has(item.id)) {
+            skippedIds++;
+            continue;
+          }
+
+          const signature = getCardSignature(item);
+
+          // Skip identical question content.
+          if (existingSignatures.has(signature)) {
+            skippedContent++;
+            continue;
+          }
+
+          newCards.push(item);
+          existingIds.add(item.id);
+          existingSignatures.add(signature);
+        }
+
+        const updatedCards = [...cards, ...newCards].sort(
+          (a, b) => Number(a.id) - Number(b.id),
+        );
+
+        if (newCards.length > 0) {
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(updatedCards));
+
+          setCards(updatedCards);
+          setIndex(0);
+          setShowAnswer(false);
+        }
+
+        const skipped = skippedIds + skippedContent + fileDuplicates;
+
+        setImportStatus(
+          `Imported ${newCards.length} new questions. ` +
+            `Skipped ${skipped} duplicates or conflicting IDs. ` +
+            `Total: ${updatedCards.length} questions.`,
+        );
+      }
+
+      // --------------------------------
+      // REPLACE QUESTIONS
+      // --------------------------------
+      else {
+        const confirmed = window.confirm(
+          `Replace all ${cards.length} existing questions ` +
+            `with ${uniqueImported.length} imported questions?\n\n` +
+            'This will also reset review progress and ' +
+            'practice test history.\n\n' +
+            'Export a backup first if you want to keep them.',
+        );
+
+        if (!confirmed) {
+          setImportStatus('Import canceled.');
+          return;
+        }
+
+        const sorted = [...uniqueImported].sort((a, b) => a.id - b.id);
+
+        const updates = {
+          [STORAGE_KEY]: JSON.stringify(sorted),
+          falconry_review_progress: '{}',
+          falconry_test_history: '[]',
+        };
+
+        // Save previous values for recovery if a write fails.
+        const previous = Object.fromEntries(
+          Object.keys(updates).map((key) => [key, localStorage.getItem(key)]),
+        );
+
+        try {
+          for (const [key, value] of Object.entries(updates)) {
+            localStorage.setItem(key, value);
+          }
+        } catch {
+          let rollbackFailed = false;
+
+          for (const [key, value] of Object.entries(previous)) {
+            try {
+              if (value === null) {
+                localStorage.removeItem(key);
+              } else {
+                localStorage.setItem(key, value);
+              }
+            } catch {
+              rollbackFailed = true;
+            }
+          }
+
+          throw new Error(
+            rollbackFailed
+              ? 'Import failed and recovery was incomplete. Restore your backup.'
+              : 'Import failed. Existing data was restored.',
+          );
+        }
+
+        setCards(sorted);
+        setIndex(0);
+        setShowAnswer(false);
+
+        setImportStatus(
+          `Replaced question bank with ${sorted.length} questions.`,
+        );
+      }
     } catch (err) {
-      setError(err.message || 'Could not import questions.');
+      setError(err.message || 'Unable to import questions.');
+    } finally {
+      input.value = '';
     }
-
-    event.target.value = '';
   };
 
   // ------------------------------------
@@ -665,15 +835,50 @@ function Flashcards() {
         + Add New Card
       </button>
 
-      <label className='import-label'>
-        Import Questions
-        <input
-          type='file'
-          accept='.json,application/json'
-          onChange={importQuestions}
-          disabled={isEditing}
-        />
-      </label>
+      <div className='flashcard-import-controls'>
+        <strong>Import Questions</strong>
+
+        <label>
+          <input
+            type='radio'
+            name='import-mode'
+            value='merge'
+            checked={importMode === 'merge'}
+            onChange={() => setImportMode('merge')}
+            disabled={isEditing}
+          />
+          Merge with existing questions
+        </label>
+
+        <label>
+          <input
+            type='radio'
+            name='import-mode'
+            value='replace'
+            checked={importMode === 'replace'}
+            onChange={() => setImportMode('replace')}
+            disabled={isEditing}
+          />
+          Replace all questions
+        </label>
+
+        <label className='import-label'>
+          {importMode === 'merge' ? 'Import & Merge' : 'Import & Replace'}
+
+          <input
+            type='file'
+            accept='.json,application/json'
+            onChange={importQuestions}
+            disabled={isEditing}
+          />
+        </label>
+
+        {importStatus && (
+          <p role='status' className='import-status'>
+            {importStatus}
+          </p>
+        )}
+      </div>
 
       {error && (
         <p className='error' role='alert'>

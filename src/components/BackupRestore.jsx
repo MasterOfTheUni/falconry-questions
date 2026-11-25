@@ -1,85 +1,380 @@
 import { useState } from 'react';
 
-const STORAGE_KEYS = {
+// V3 deck storage
+const DECKS_KEY = 'studydeck_decks_v1';
+const ACTIVE_DECK_KEY = 'studydeck_active_v1';
+const SNAPSHOT_PREFIX = 'studydeck_snapshot_v1_';
+
+// Storage used by the existing study components
+const CURRENT_KEYS = {
   questions: 'falconry_questions',
-  reviewProgress: 'falconry_review_progress',
-  testHistory: 'falconry_test_history',
-  nextCardId: 'falconry_next_card_id',
+  reviews: 'falconry_review_progress',
+  tests: 'falconry_test_history',
+  nextId: 'falconry_next_card_id',
 };
 
-const APP_ID = 'falconry-study';
-const BACKUP_VERSION = 1;
-
-function readJSON(key, fallback) {
-  const stored = localStorage.getItem(key);
-
-  if (stored === null) return fallback;
-
-  return JSON.parse(stored);
-}
+const APP_ID = 'studydeck';
+const BACKUP_VERSION = 2;
 
 function isObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-// Validate before importing or exporting.
-function validateBackup(backup) {
+// ------------------------------------
+// VALIDATE QUESTION DATA
+// ------------------------------------
+
+function validateDeckData(data) {
   if (
-    !isObject(backup) ||
-    backup.app !== APP_ID ||
-    backup.version !== BACKUP_VERSION ||
-    !isObject(backup.data)
+    !isObject(data) ||
+    !Array.isArray(data.questions) ||
+    !isObject(data.reviewProgress) ||
+    !Array.isArray(data.testHistory) ||
+    !Number.isSafeInteger(data.nextCardId) ||
+    data.nextCardId < 0
   ) {
-    throw new Error('This is not a supported Falconry Study backup.');
+    throw new Error('A deck contains missing or invalid study data.');
   }
 
-  const { questions, reviewProgress, testHistory, nextCardId } = backup.data;
+  const ids = new Set();
 
-  if (
-    !Array.isArray(questions) ||
-    !isObject(reviewProgress) ||
-    !Array.isArray(testHistory) ||
-    !Number.isSafeInteger(nextCardId) ||
-    nextCardId < 0
-  ) {
-    throw new Error('The backup contains missing or invalid data.');
+  for (const card of data.questions) {
+    if (!isObject(card) || card.id == null) {
+      throw new Error('A backup contains an invalid flashcard.');
+    }
+
+    const id = String(card.id);
+
+    if (ids.has(id)) {
+      throw new Error(`Duplicate question ID ${id} found in a deck.`);
+    }
+
+    ids.add(id);
   }
 
-  if (questions.some((card) => !isObject(card) || card.id == null)) {
-    throw new Error('The backup contains invalid flashcards.');
-  }
-
-  const ids = questions.map((card) => String(card.id));
-
-  if (new Set(ids).size !== ids.length) {
-    throw new Error('The backup contains duplicate question IDs.');
-  }
-
-  return backup.data;
+  return {
+    questions: data.questions,
+    reviewProgress: data.reviewProgress,
+    testHistory: data.testHistory,
+    nextCardId: data.nextCardId,
+  };
 }
 
-// Gather all saved study data.
+// ------------------------------------
+// DECODE EXISTING STORAGE
+// ------------------------------------
+
+function decodeRawData(raw) {
+  if (
+    !isObject(raw) ||
+    ['questions', 'reviews', 'tests', 'nextId'].some(
+      (field) => typeof raw[field] !== 'string',
+    )
+  ) {
+    throw new Error('Saved deck data is invalid.');
+  }
+
+  return validateDeckData({
+    questions: JSON.parse(raw.questions),
+    reviewProgress: JSON.parse(raw.reviews),
+    testHistory: JSON.parse(raw.tests),
+    nextCardId: Number(raw.nextId),
+  });
+}
+
+function encodeRawData(data) {
+  const valid = validateDeckData(data);
+
+  return {
+    questions: JSON.stringify(valid.questions),
+    reviews: JSON.stringify(valid.reviewProgress),
+    tests: JSON.stringify(valid.testHistory),
+    nextId: String(valid.nextCardId),
+  };
+}
+
+// The active deck uses the original falconry_* keys.
+function readActiveDeckData() {
+  const raw = {
+    questions: localStorage.getItem(CURRENT_KEYS.questions) ?? '[]',
+
+    reviews: localStorage.getItem(CURRENT_KEYS.reviews) ?? '{}',
+
+    tests: localStorage.getItem(CURRENT_KEYS.tests) ?? '[]',
+
+    nextId: localStorage.getItem(CURRENT_KEYS.nextId) ?? '0',
+  };
+
+  return decodeRawData(raw);
+}
+
+// Inactive decks use saved snapshots.
+function readInactiveDeckData(deckId) {
+  const saved = localStorage.getItem(SNAPSHOT_PREFIX + deckId);
+
+  if (saved === null) {
+    throw new Error(`Missing saved data for deck: ${deckId}`);
+  }
+
+  return decodeRawData(JSON.parse(saved));
+}
+
+// ------------------------------------
+// VALIDATE DECK LIBRARY
+// ------------------------------------
+
+function validateDecks(decks, activeDeckId) {
+  if (!Array.isArray(decks) || decks.length === 0) {
+    throw new Error('No valid decks were found.');
+  }
+
+  const ids = new Set();
+
+  for (const deck of decks) {
+    if (
+      !isObject(deck) ||
+      typeof deck.id !== 'string' ||
+      !/^[a-zA-Z0-9_-]{1,100}$/.test(deck.id) ||
+      typeof deck.name !== 'string' ||
+      !deck.name.trim()
+    ) {
+      throw new Error('Invalid deck information.');
+    }
+
+    if (ids.has(deck.id)) {
+      throw new Error('Duplicate deck IDs found.');
+    }
+
+    ids.add(deck.id);
+  }
+
+  if (!ids.has(activeDeckId)) {
+    throw new Error('The active deck does not exist in the backup.');
+  }
+}
+
+// ------------------------------------
+// CREATE MULTI-DECK BACKUP
+// ------------------------------------
+
 function createBackup() {
-  const backup = {
+  const storedDecks = localStorage.getItem(DECKS_KEY);
+
+  const decks = storedDecks
+    ? JSON.parse(storedDecks)
+    : [{ id: 'falconry', name: 'Falconry' }];
+
+  const activeDeckId = localStorage.getItem(ACTIVE_DECK_KEY) || 'falconry';
+
+  validateDecks(decks, activeDeckId);
+
+  const backupDecks = decks.map((deck) => {
+    const data =
+      deck.id === activeDeckId
+        ? readActiveDeckData()
+        : readInactiveDeckData(deck.id);
+
+    return {
+      id: deck.id,
+      name: deck.name,
+      data,
+    };
+  });
+
+  return {
     app: APP_ID,
     version: BACKUP_VERSION,
     exportedAt: new Date().toISOString(),
+    activeDeckId,
+    decks: backupDecks,
+  };
+}
 
-    data: {
-      questions: readJSON(STORAGE_KEYS.questions, []),
+// ------------------------------------
+// VALIDATE V2 BACKUP
+// ------------------------------------
 
-      reviewProgress: readJSON(STORAGE_KEYS.reviewProgress, {}),
+function validateV2Backup(backup) {
+  if (
+    !isObject(backup) ||
+    backup.app !== APP_ID ||
+    backup.version !== BACKUP_VERSION
+  ) {
+    throw new Error('This is not a supported StudyDeck backup.');
+  }
 
-      testHistory: readJSON(STORAGE_KEYS.testHistory, []),
+  validateDecks(backup.decks, backup.activeDeckId);
 
-      nextCardId: Number(localStorage.getItem(STORAGE_KEYS.nextCardId) ?? 0),
-    },
+  const decks = backup.decks.map((deck) => ({
+    id: deck.id,
+    name: deck.name,
+    data: validateDeckData(deck.data),
+  }));
+
+  return {
+    app: APP_ID,
+    version: BACKUP_VERSION,
+    activeDeckId: backup.activeDeckId,
+    decks,
+  };
+}
+
+// ------------------------------------
+// SUPPORT OLDER FALCONRY BACKUPS
+// ------------------------------------
+
+// Older backups contained one Falconry deck.
+// Restore them into Falconry without deleting
+// unrelated decks.
+function parseBackupFile(backup) {
+  if (backup?.app === APP_ID && backup?.version === BACKUP_VERSION) {
+    return {
+      kind: 'full',
+      backup: validateV2Backup(backup),
+    };
+  }
+
+  if (backup?.app === 'falconry-study' && backup?.version === 1) {
+    return {
+      kind: 'legacy',
+      backup: {
+        data: validateDeckData(backup.data),
+        exportedAt: backup.exportedAt,
+      },
+    };
+  }
+
+  throw new Error('Unsupported backup file. Please select a StudyDeck backup.');
+}
+
+// Convert an old one-deck backup into the
+// current multi-deck format, keeping other decks.
+function mergeLegacyBackup(legacyData) {
+  const current = createBackup();
+
+  const falconryIndex = current.decks.findIndex(
+    (deck) => deck.id === 'falconry',
+  );
+
+  const falconryDeck = {
+    id: 'falconry',
+    name: 'Falconry',
+    data: legacyData,
   };
 
-  validateBackup(backup);
+  if (falconryIndex >= 0) {
+    current.decks[falconryIndex] = {
+      ...current.decks[falconryIndex],
+      data: legacyData,
+    };
+  } else {
+    current.decks.push(falconryDeck);
+  }
 
-  return backup;
+  return validateV2Backup(current);
 }
+
+// ------------------------------------
+// RESTORE ALL DECKS
+// ------------------------------------
+
+function applyBackup(backup) {
+  const valid = validateV2Backup(backup);
+
+  const activeDeck = valid.decks.find((deck) => deck.id === valid.activeDeckId);
+
+  const activeData = encodeRawData(activeDeck.data);
+
+  // Prepare all writes before changing storage.
+  const updates = new Map();
+
+  for (const deck of valid.decks) {
+    updates.set(
+      SNAPSHOT_PREFIX + deck.id,
+      JSON.stringify(encodeRawData(deck.data)),
+    );
+  }
+
+  updates.set(CURRENT_KEYS.questions, activeData.questions);
+
+  updates.set(CURRENT_KEYS.reviews, activeData.reviews);
+
+  updates.set(CURRENT_KEYS.tests, activeData.tests);
+
+  updates.set(CURRENT_KEYS.nextId, activeData.nextId);
+
+  updates.set(
+    DECKS_KEY,
+    JSON.stringify(
+      valid.decks.map(({ id, name }) => ({
+        id,
+        name,
+      })),
+    ),
+  );
+
+  updates.set(ACTIVE_DECK_KEY, valid.activeDeckId);
+
+  // Remove old snapshots that are not
+  // included in this restored library.
+  const validSnapshotKeys = new Set(
+    valid.decks.map((deck) => SNAPSHOT_PREFIX + deck.id),
+  );
+
+  const obsoleteKeys = [];
+
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i);
+
+    if (key?.startsWith(SNAPSHOT_PREFIX) && !validSnapshotKeys.has(key)) {
+      obsoleteKeys.push(key);
+    }
+  }
+
+  const changedKeys = new Set([...updates.keys(), ...obsoleteKeys]);
+
+  // Remember previous values in case
+  // a storage write fails.
+  const previous = new Map();
+
+  for (const key of changedKeys) {
+    previous.set(key, localStorage.getItem(key));
+  }
+
+  try {
+    for (const [key, value] of updates) {
+      localStorage.setItem(key, value);
+    }
+
+    for (const key of obsoleteKeys) {
+      localStorage.removeItem(key);
+    }
+  } catch {
+    let rollbackFailed = false;
+
+    for (const [key, value] of previous) {
+      try {
+        if (value === null) {
+          localStorage.removeItem(key);
+        } else {
+          localStorage.setItem(key, value);
+        }
+      } catch {
+        rollbackFailed = true;
+      }
+    }
+
+    throw new Error(
+      rollbackFailed
+        ? 'Restore failed and recovery was incomplete. Keep your backup file.'
+        : 'Restore failed. Previous data was recovered.',
+    );
+  }
+}
+
+// ------------------------------------
+// COMPONENT
+// ------------------------------------
 
 function BackupRestore() {
   const [pendingBackup, setPendingBackup] = useState(null);
@@ -87,9 +382,9 @@ function BackupRestore() {
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
 
-  // ---------------------------------
-  // EXPORT BACKUP
-  // ---------------------------------
+  // ------------------------------------
+  // EXPORT
+  // ------------------------------------
 
   const exportBackup = async () => {
     setMessage('');
@@ -100,42 +395,34 @@ function BackupRestore() {
 
       const json = JSON.stringify(backup, null, 2);
 
-      const date = new Date().toISOString().slice(0, 10);
-
-      const filename = `falconry-backup-${date}.json`;
+      const filename =
+        'studydeck-backup-' + new Date().toISOString().slice(0, 10) + '.json';
 
       const file = new File([json], filename, { type: 'application/json' });
 
-      // Use the native share sheet when
-      // the device supports file sharing.
-      if (
-        navigator.share &&
-        navigator.canShare?.({
-          files: [file],
-        })
-      ) {
+      // iPhone native share sheet
+      if (navigator.share && navigator.canShare?.({ files: [file] })) {
         try {
           await navigator.share({
             files: [file],
-            title: 'Falconry Study Backup',
+            title: 'StudyDeck Backup',
           });
 
           setMessage(
             'Sharing completed. Check that your backup was saved in Files.',
           );
-        } catch (shareError) {
-          if (shareError.name === 'AbortError') {
+        } catch (err) {
+          if (err.name === 'AbortError') {
             setMessage('Export canceled.');
           } else {
-            setError('Unable to share the backup. Try exporting in Safari.');
+            setError('Unable to share backup. Try exporting from Safari.');
           }
         }
 
         return;
       }
 
-      // Fallback for browsers without
-      // native file sharing.
+      // Browser download fallback
       const url = URL.createObjectURL(file);
 
       const link = document.createElement('a');
@@ -150,15 +437,15 @@ function BackupRestore() {
         URL.revokeObjectURL(url);
       }, 30000);
 
-      setMessage('Backup download requested. Check your Downloads folder.');
+      setMessage('Backup download requested. Check Downloads.');
     } catch (err) {
       setError(err.message || 'Unable to export backup.');
     }
   };
 
-  // ---------------------------------
+  // ------------------------------------
   // SELECT BACKUP FILE
-  // ---------------------------------
+  // ------------------------------------
 
   const selectBackup = async (event) => {
     const input = event.target;
@@ -171,26 +458,24 @@ function BackupRestore() {
     setPendingBackup(null);
 
     try {
-      if (file.size > 10 * 1024 * 1024) {
-        throw new Error('Backup files must be smaller than 10 MB.');
+      if (file.size > 20 * 1024 * 1024) {
+        throw new Error('Backup file exceeds the 20 MB limit.');
       }
 
       const text = await file.text();
-      const backup = JSON.parse(text);
+      const parsed = JSON.parse(text);
 
-      if (Array.isArray(backup)) {
+      if (Array.isArray(parsed)) {
         throw new Error(
-          'This looks like a question-only JSON file. Import it from Flashcards instead.',
+          'This is a question-only JSON file. Import it from Flashcards instead.',
         );
       }
 
-      validateBackup(backup);
+      const result = parseBackupFile(parsed);
 
-      // Only preview the backup here.
-      // Do not overwrite anything yet.
       setPendingBackup({
         filename: file.name,
-        backup,
+        ...result,
       });
     } catch (err) {
       setError(err.message || 'Unable to read backup.');
@@ -199,95 +484,71 @@ function BackupRestore() {
     }
   };
 
-  // ---------------------------------
-  // RESTORE BACKUP
-  // ---------------------------------
+  // ------------------------------------
+  // RESTORE
+  // ------------------------------------
 
   const restoreBackup = () => {
     if (!pendingBackup) return;
 
-    const confirmed = window.confirm(
-      'Restore this backup?\n\n' +
-        'This will replace ALL questions, review progress, and test history currently saved on this device.',
-    );
+    const isLegacy = pendingBackup.kind === 'legacy';
 
-    if (!confirmed) return;
+    const warning = isLegacy
+      ? 'Restore the Falconry deck from this older backup?\n\n' +
+        'Other decks will remain unchanged. Current Falconry data will be replaced.'
+      : 'Restore ALL decks from this backup?\n\n' +
+        'This replaces the current deck library, including all questions, reviews, and test history.';
+
+    if (!window.confirm(warning)) return;
 
     try {
-      const data = validateBackup(pendingBackup.backup);
+      const backup = isLegacy
+        ? mergeLegacyBackup(pendingBackup.backup.data)
+        : pendingBackup.backup;
 
-      const updatedValues = {
-        [STORAGE_KEYS.questions]: JSON.stringify(data.questions),
+      applyBackup(backup);
 
-        [STORAGE_KEYS.reviewProgress]: JSON.stringify(data.reviewProgress),
+      // App.jsx keeps its deck list in React state.
+      // Reload to initialize that state from
+      // the newly restored library.
+      window.alert('Backup restored successfully! StudyDeck will reload.');
 
-        [STORAGE_KEYS.testHistory]: JSON.stringify(data.testHistory),
-
-        [STORAGE_KEYS.nextCardId]: String(data.nextCardId),
-      };
-
-      // Preserve current values in case
-      // writing a restored value fails.
-      const previousValues = {};
-
-      for (const key of Object.keys(updatedValues)) {
-        previousValues[key] = localStorage.getItem(key);
-      }
-
-      try {
-        for (const [key, value] of Object.entries(updatedValues)) {
-          localStorage.setItem(key, value);
-        }
-      } catch (writeError) {
-        // Attempt to roll back all changes.
-        let rollbackSucceeded = true;
-
-        for (const [key, value] of Object.entries(previousValues)) {
-          try {
-            if (value === null) {
-              localStorage.removeItem(key);
-            } else {
-              localStorage.setItem(key, value);
-            }
-          } catch {
-            rollbackSucceeded = false;
-          }
-        }
-
-        throw new Error(
-          rollbackSucceeded
-            ? 'Restore failed. Previous data was restored.'
-            : 'Restore failed and rollback was incomplete. Check your saved data.',
-        );
-      }
-
-      setPendingBackup(null);
-      setError('');
-
-      setMessage(
-        'Backup restored successfully! Open Flashcards or Progress to see your restored data.',
-      );
+      window.location.reload();
     } catch (err) {
       setError(err.message || 'Unable to restore backup.');
     }
   };
 
-  const pendingData = pendingBackup?.backup.data;
+  const isLegacy = pendingBackup?.kind === 'legacy';
+
+  const previewDecks = pendingBackup
+    ? isLegacy
+      ? [
+          {
+            id: 'falconry',
+            name: 'Falconry',
+            data: pendingBackup.backup.data,
+          },
+        ]
+      : pendingBackup.backup.decks
+    : [];
+
+  const totalQuestions = previewDecks.reduce(
+    (total, deck) => total + deck.data.questions.length,
+    0,
+  );
+
+  const totalTests = previewDecks.reduce(
+    (total, deck) => total + deck.data.testHistory.length,
+    0,
+  );
 
   return (
-    <div
-      className='backup-page'
-      style={{
-        display: 'flex',
-        flexDirection: 'column',
-        gap: 20,
-      }}
-    >
+    <div className='backup-page'>
       <h2>Backup & Restore</h2>
 
       <p>
-        Keep a copy of your questions and study progress so you can restore them
-        if needed.
+        Save all your study decks, questions, review progress, and test results.
       </p>
 
       {error && (
@@ -303,21 +564,18 @@ function BackupRestore() {
       <section
         style={{
           padding: 20,
+          marginBottom: 20,
+          background: '#f5f7f5',
           border: '1px solid #dce5dd',
           borderRadius: 14,
-          background: '#f5f7f5',
         }}
       >
-        <h3>Export Your Data</h3>
+        <h3>Export All Decks</h3>
 
-        <p>Create a JSON backup containing:</p>
-
-        <ul>
-          <li>All flashcards</li>
-          <li>Edited and newly created questions</li>
-          <li>Review progress and due dates</li>
-          <li>Practice test history</li>
-        </ul>
+        <p>
+          Create one backup containing every deck, including all questions,
+          review progress, and practice test history.
+        </p>
 
         <button
           type='button'
@@ -332,7 +590,7 @@ function BackupRestore() {
             fontWeight: 600,
           }}
         >
-          Export Backup
+          Export Complete Backup
         </button>
       </section>
 
@@ -345,9 +603,9 @@ function BackupRestore() {
           borderRadius: 14,
         }}
       >
-        <h3>Restore Your Data</h3>
+        <h3>Restore Backup</h3>
 
-        <p>Select a previously exported Falconry Study backup file.</p>
+        <p>Select a StudyDeck backup file to preview its contents.</p>
 
         <input
           type='file'
@@ -368,35 +626,45 @@ function BackupRestore() {
               borderRadius: 10,
             }}
           >
-            <h4>Backup Ready to Restore</h4>
+            <h4>Backup Preview</h4>
 
             <p>
               <strong>File:</strong> {pendingBackup.filename}
             </p>
 
             <p>
-              <strong>Questions:</strong> {pendingData.questions.length}
+              <strong>Decks:</strong> {previewDecks.length}
             </p>
 
             <p>
-              <strong>Tests:</strong> {pendingData.testHistory.length}
+              <strong>Questions:</strong> {totalQuestions}
             </p>
 
             <p>
-              <strong>Created:</strong>{' '}
-              {pendingBackup.backup.exportedAt
-                ? new Date(pendingBackup.backup.exportedAt).toLocaleString()
-                : 'Unknown'}
+              <strong>Practice Tests:</strong> {totalTests}
             </p>
 
-            <p
-              style={{
-                color: '#a52a2a',
-                fontSize: 14,
-              }}
-            >
-              Restoring will replace your current data on this device.
-            </p>
+            <h4>Included Decks</h4>
+
+            <ul>
+              {previewDecks.map((deck) => (
+                <li key={deck.id}>
+                  {deck.name} — {deck.data.questions.length} questions
+                </li>
+              ))}
+            </ul>
+
+            {isLegacy ? (
+              <p style={{ color: '#8a4b20' }}>
+                This is an older Falconry backup. Restoring it will replace
+                Falconry data but keep your other decks.
+              </p>
+            ) : (
+              <p style={{ color: '#a52a2a' }}>
+                Restoring will replace every deck currently saved on this
+                device.
+              </p>
+            )}
 
             <button
               type='button'
@@ -411,7 +679,7 @@ function BackupRestore() {
                 fontWeight: 600,
               }}
             >
-              Restore This Backup
+              Restore Backup
             </button>
 
             <button
@@ -421,9 +689,9 @@ function BackupRestore() {
                 width: '100%',
                 padding: 12,
                 marginTop: 8,
+                background: 'white',
                 border: '1px solid #ccc',
                 borderRadius: 10,
-                background: 'white',
               }}
             >
               Cancel
