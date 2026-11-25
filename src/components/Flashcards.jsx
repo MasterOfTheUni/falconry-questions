@@ -1,13 +1,195 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 
 const STORAGE_KEY = 'falconry_questions';
-
 const NEXT_ID_KEY = 'falconry_next_card_id';
+
+const OPTION_LETTERS = 'abcdefghijklmnopqrstuvwxyz'.split('');
+
+const TRUE_FALSE_OPTIONS = {
+  a: 'True',
+  b: 'False',
+};
+
+// Convert a True/False answer to our standard a/b format.
+function trueFalseLetter(card) {
+  const value = String(card.correctAnswer ?? '').toLowerCase();
+
+  if (value === 'a' || value === 'true') return 'a';
+  if (value === 'b' || value === 'false') return 'b';
+
+  const answer = String(card.correctAnswerText ?? '')
+    .trim()
+    .toLowerCase();
+
+  if (answer === 'true') return 'a';
+  if (answer === 'false') return 'b';
+
+  return '';
+}
+
+// Make sure existing multiple-choice options have
+// consecutive letters, without losing the correct answer.
+function normalizeMultipleChoice(card) {
+  const entries = Object.entries(card.options || {});
+
+  if (entries.length > OPTION_LETTERS.length) {
+    throw new Error('A maximum of 26 answer choices is supported.');
+  }
+
+  const selectedIndex = entries.findIndex(
+    ([letter]) => letter === card.correctAnswer,
+  );
+
+  const options = Object.fromEntries(
+    entries.map(([, value], i) => [OPTION_LETTERS[i], String(value ?? '')]),
+  );
+
+  return {
+    ...card,
+    options,
+    correctAnswer: selectedIndex >= 0 ? OPTION_LETTERS[selectedIndex] : '',
+  };
+}
+
+// Reusable helpers for adding/removing choices.
+function addAnswerChoice(setter) {
+  setter((current) => {
+    if (!current || current.type !== 'multiple_choice') {
+      return current;
+    }
+
+    const count = Object.keys(current.options || {}).length;
+
+    if (count >= OPTION_LETTERS.length) {
+      return current;
+    }
+
+    return {
+      ...current,
+      options: {
+        ...current.options,
+        [OPTION_LETTERS[count]]: '',
+      },
+    };
+  });
+}
+
+function removeAnswerChoice(setter, letter) {
+  setter((current) => {
+    if (!current || current.type !== 'multiple_choice') {
+      return current;
+    }
+
+    const entries = Object.entries(current.options || {});
+
+    // Always keep at least two answers.
+    if (entries.length <= 2) return current;
+
+    const remaining = entries.filter(([key]) => key !== letter);
+
+    // Preserve the selected correct answer if it remains.
+    const correctIndex = remaining.findIndex(
+      ([key]) => key === current.correctAnswer,
+    );
+
+    const options = Object.fromEntries(
+      remaining.map(([, value], i) => [OPTION_LETTERS[i], value]),
+    );
+
+    return {
+      ...current,
+      options,
+      correctAnswer: correctIndex >= 0 ? OPTION_LETTERS[correctIndex] : '',
+    };
+  });
+}
+
+function updateAnswerChoice(setter, letter, value) {
+  setter((current) => ({
+    ...current,
+    options: {
+      ...current.options,
+      [letter]: value,
+    },
+  }));
+}
+
+// Shared form for creating and editing multiple-choice cards.
+function AnswerChoicesEditor({
+  options,
+  correctAnswer,
+  onOptionChange,
+  onAnswerChange,
+  onAdd,
+  onRemove,
+}) {
+  const entries = Object.entries(options || {});
+
+  return (
+    <div className='answer-choices-editor'>
+      <h4>Answer Choices</h4>
+
+      {entries.map(([letter, value]) => (
+        <div className='answer-choice-row' key={letter}>
+          <label>
+            Option {letter.toUpperCase()}
+            <input
+              type='text'
+              value={value}
+              onChange={(e) => onOptionChange(letter, e.target.value)}
+              placeholder={`Enter option ${letter.toUpperCase()}`}
+            />
+          </label>
+
+          <button
+            type='button'
+            className='remove-option-button'
+            onClick={() => onRemove(letter)}
+            disabled={entries.length <= 2}
+            aria-label={`Remove option ${letter.toUpperCase()}`}
+          >
+            Remove
+          </button>
+        </div>
+      ))}
+
+      <button
+        type='button'
+        className='add-option-button'
+        onClick={onAdd}
+        disabled={entries.length >= 26}
+      >
+        + Add Answer Choice
+      </button>
+
+      <small>{entries.length} of 26 possible answers</small>
+
+      <label>
+        Correct Answer
+        <select
+          value={correctAnswer || ''}
+          onChange={(e) => onAnswerChange(e.target.value)}
+        >
+          <option value=''>Select correct answer</option>
+
+          {entries.map(([letter, value]) => (
+            <option key={letter} value={letter}>
+              {letter.toUpperCase()}
+              {value.trim() ? ` — ${value}` : ''}
+            </option>
+          ))}
+        </select>
+      </label>
+    </div>
+  );
+}
 
 function Flashcards() {
   const [cards, setCards] = useState(() => {
     try {
-      return JSON.parse(localStorage.getItem(STORAGE_KEY)) || [];
+      const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]');
+
+      return Array.isArray(saved) ? saved : [];
     } catch {
       return [];
     }
@@ -18,21 +200,28 @@ function Flashcards() {
   const [error, setError] = useState('');
   const [editForm, setEditForm] = useState(null);
   const [createForm, setCreateForm] = useState(null);
+  const [jumpQuestion, setJumpQuestion] = useState('');
 
-  // Import questions from JSON
+  const touchStart = useRef(null);
+
+  const isEditing = !!editForm || !!createForm;
+
+  // ------------------------------------
+  // IMPORT QUESTIONS
+  // ------------------------------------
+
   const importQuestions = async (event) => {
-    const file = event.target.files[0];
+    const file = event.target.files?.[0];
     if (!file) return;
 
     try {
-      const text = await file.text();
-      const data = JSON.parse(text);
+      const data = JSON.parse(await file.text());
 
       if (!Array.isArray(data)) {
-        throw new Error('JSON must contain an array.');
+        throw new Error('JSON must contain an array of questions.');
       }
 
-      const sorted = [...data].sort((a, b) => a.id - b.id);
+      const sorted = [...data].sort((a, b) => Number(a.id) - Number(b.id));
 
       localStorage.setItem(STORAGE_KEY, JSON.stringify(sorted));
 
@@ -41,19 +230,105 @@ function Flashcards() {
       setShowAnswer(false);
       setError('');
     } catch (err) {
-      setError(err.message);
+      setError(err.message || 'Could not import questions.');
     }
 
     event.target.value = '';
   };
 
-  const changeCard = (direction) => {
-    setIndex((current) => current + direction);
+  // ------------------------------------
+  // FLASHCARD NAVIGATION
+  // ------------------------------------
+
+  const goToCard = (newIndex) => {
+    if (isEditing || cards.length === 0) return;
+
+    const safeIndex = Math.max(0, Math.min(newIndex, cards.length - 1));
+
+    setIndex(safeIndex);
     setShowAnswer(false);
+    setError('');
   };
+
+  const changeCard = (direction) => {
+    goToCard(index + direction);
+  };
+
+  const jumpToQuestion = (event) => {
+    event.preventDefault();
+
+    if (isEditing) return;
+
+    const questionNumber = jumpQuestion.trim();
+
+    if (!questionNumber) return;
+
+    const foundIndex = cards.findIndex(
+      (card) => String(card.id) === questionNumber,
+    );
+
+    if (foundIndex === -1) {
+      setError(`Question #${questionNumber} not found.`);
+      return;
+    }
+
+    goToCard(foundIndex);
+    setJumpQuestion('');
+  };
+
+  const randomCard = () => {
+    if (isEditing || cards.length < 2) return;
+
+    let randomIndex = Math.floor(Math.random() * (cards.length - 1));
+
+    if (randomIndex >= index) {
+      randomIndex += 1;
+    }
+
+    goToCard(randomIndex);
+  };
+
+  // ------------------------------------
+  // SWIPE NAVIGATION
+  // ------------------------------------
+
+  const handleTouchStart = (event) => {
+    if (isEditing) return;
+
+    const touch = event.touches[0];
+
+    touchStart.current = {
+      x: touch.clientX,
+      y: touch.clientY,
+    };
+  };
+
+  const handleTouchEnd = (event) => {
+    if (!touchStart.current || isEditing) return;
+
+    const touch = event.changedTouches[0];
+
+    const deltaX = touch.clientX - touchStart.current.x;
+    const deltaY = touch.clientY - touchStart.current.y;
+
+    touchStart.current = null;
+
+    // Ignore short swipes or vertical scrolling.
+    if (Math.abs(deltaX) < 60 || Math.abs(deltaX) < Math.abs(deltaY) * 1.5) {
+      return;
+    }
+
+    changeCard(deltaX < 0 ? 1 : -1);
+  };
+
+  // ------------------------------------
+  // DELETE CARD
+  // ------------------------------------
 
   const deleteCard = () => {
     const card = cards[index];
+
+    if (!card || isEditing) return;
 
     const confirmed = window.confirm(
       `Are you sure you want to delete question #${card.id}?`,
@@ -61,49 +336,60 @@ function Flashcards() {
 
     if (!confirmed) return;
 
-    const updatedCards = cards.filter((_, cardIndex) => cardIndex !== index);
+    const updatedCards = cards.filter((_, i) => i !== index);
 
-    // Save updated cards to localStorage
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(updatedCards));
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(updatedCards));
 
-    // Update React state
-    setCards(updatedCards);
+      setCards(updatedCards);
 
-    // Adjust index if we deleted the last card
-    setIndex((current) =>
-      Math.min(current, Math.max(0, updatedCards.length - 1)),
-    );
+      setIndex((current) =>
+        Math.min(current, Math.max(0, updatedCards.length - 1)),
+      );
 
-    // Reset answer visibility
-    setShowAnswer(false);
+      setShowAnswer(false);
+      setError('');
+    } catch {
+      setError('Unable to delete card.');
+    }
   };
+
+  // ------------------------------------
+  // EDIT CARD
+  // ------------------------------------
 
   const startEditing = () => {
     const card = cards[index];
 
-    setEditForm({
-      ...card,
-      options: { ...(card.options || {}) },
-    });
+    if (!card || isEditing) return;
 
-    setShowAnswer(false);
-    setError('');
+    try {
+      if (card.type === 'multiple_choice') {
+        setEditForm(normalizeMultipleChoice(card));
+      } else if (card.type === 'true_false') {
+        setEditForm({
+          ...card,
+          options: { ...TRUE_FALSE_OPTIONS },
+          correctAnswer: trueFalseLetter(card),
+        });
+      } else {
+        setEditForm({
+          ...card,
+          options: { ...(card.options || {}) },
+        });
+      }
+
+      setShowAnswer(false);
+      setError('');
+    } catch (err) {
+      setError(err.message);
+    }
   };
 
   const updateEditField = (field, value) => {
     setEditForm((current) => ({
       ...current,
       [field]: value,
-    }));
-  };
-
-  const updateOption = (letter, value) => {
-    setEditForm((current) => ({
-      ...current,
-      options: {
-        ...current.options,
-        [letter]: value,
-      },
     }));
   };
 
@@ -118,8 +404,8 @@ function Flashcards() {
     let updatedCard = { ...editForm };
 
     if (updatedCard.type === 'definition') {
-      const term = updatedCard.term?.trim();
-      const definition = updatedCard.definition?.trim();
+      const term = (updatedCard.term || '').trim();
+      const definition = (updatedCard.definition || '').trim();
 
       if (!term || !definition) {
         setError('Term and definition are required.');
@@ -135,22 +421,45 @@ function Flashcards() {
         answerStatement: definition,
       };
     } else {
-      const question = updatedCard.question?.trim();
+      const question = (updatedCard.question || '').trim();
+
+      const options =
+        updatedCard.type === 'true_false'
+          ? { ...TRUE_FALSE_OPTIONS }
+          : Object.fromEntries(
+              Object.entries(updatedCard.options || {}).map(([key, value]) => [
+                key,
+                String(value).trim(),
+              ]),
+            );
+
       const correctAnswer = updatedCard.correctAnswer;
 
+      if (!question) {
+        setError('Enter a question.');
+        return;
+      }
+
       if (
-        !question ||
-        !correctAnswer ||
-        !updatedCard.options?.[correctAnswer]?.trim()
+        updatedCard.type === 'multiple_choice' &&
+        (Object.keys(options).length < 2 ||
+          Object.values(options).some((value) => !value))
       ) {
-        setError('Question and correct answer are required.');
+        setError('At least two non-empty answer choices are required.');
+        return;
+      }
+
+      if (!options[correctAnswer]) {
+        setError('Select a valid correct answer.');
         return;
       }
 
       updatedCard = {
         ...updatedCard,
         question,
-        correctAnswerText: updatedCard.options[correctAnswer].trim(),
+        options,
+        correctAnswerText: options[correctAnswer],
+        answerStatement: options[correctAnswer],
       };
     }
 
@@ -158,15 +467,25 @@ function Flashcards() {
       i === index ? updatedCard : card,
     );
 
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(updatedCards));
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(updatedCards));
 
-    setCards(updatedCards);
-    setEditForm(null);
-    setShowAnswer(false);
-    setError('');
+      setCards(updatedCards);
+      setEditForm(null);
+      setShowAnswer(false);
+      setError('');
+    } catch {
+      setError('Unable to save card.');
+    }
   };
 
+  // ------------------------------------
+  // CREATE CARD
+  // ------------------------------------
+
   const startCreating = () => {
+    if (isEditing) return;
+
     setCreateForm({
       type: 'definition',
       term: '',
@@ -193,16 +512,6 @@ function Flashcards() {
     }));
   };
 
-  const updateCreateOption = (letter, value) => {
-    setCreateForm((current) => ({
-      ...current,
-      options: {
-        ...current.options,
-        [letter]: value,
-      },
-    }));
-  };
-
   const cancelCreating = () => {
     setCreateForm(null);
     setError('');
@@ -213,6 +522,7 @@ function Flashcards() {
 
     let newCard;
 
+    // Definition
     if (createForm.type === 'definition') {
       const term = createForm.term.trim();
       const definition = createForm.definition.trim();
@@ -233,7 +543,33 @@ function Flashcards() {
         answerStatement: definition,
         explanation: '',
       };
-    } else {
+    }
+
+    // True / False
+    else if (createForm.type === 'true_false') {
+      const question = createForm.question.trim();
+      const correctAnswer = createForm.correctAnswer;
+
+      if (!question || !TRUE_FALSE_OPTIONS[correctAnswer]) {
+        setError('Enter a question and select True or False.');
+        return;
+      }
+
+      newCard = {
+        type: 'true_false',
+        term: null,
+        definition: null,
+        question,
+        options: { ...TRUE_FALSE_OPTIONS },
+        correctAnswer,
+        correctAnswerText: TRUE_FALSE_OPTIONS[correctAnswer],
+        answerStatement: TRUE_FALSE_OPTIONS[correctAnswer],
+        explanation: createForm.explanation.trim(),
+      };
+    }
+
+    // Multiple Choice
+    else {
       const question = createForm.question.trim();
 
       const options = Object.fromEntries(
@@ -243,12 +579,25 @@ function Flashcards() {
         ]),
       );
 
-      if (!question || Object.values(options).some((v) => !v)) {
-        setError('Enter a question and all four options.');
+      const correctAnswer = createForm.correctAnswer;
+
+      if (!question) {
+        setError('Enter a question.');
         return;
       }
 
-      const correctAnswer = createForm.correctAnswer;
+      if (
+        Object.keys(options).length < 2 ||
+        Object.values(options).some((value) => !value)
+      ) {
+        setError('Enter at least two non-empty answer choices.');
+        return;
+      }
+
+      if (!options[correctAnswer]) {
+        setError('Select the correct answer.');
+        return;
+      }
 
       newCard = {
         type: 'multiple_choice',
@@ -263,7 +612,7 @@ function Flashcards() {
       };
     }
 
-    // Generate a unique numeric ID.
+    // Generate a new unique ID.
     const existingMax = Math.max(
       0,
       ...cards.map((card) => Number(card.id) || 0),
@@ -287,27 +636,31 @@ function Flashcards() {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(updatedCards));
 
       localStorage.setItem(NEXT_ID_KEY, String(nextId));
+
+      setCards(updatedCards);
+      setIndex(updatedCards.length - 1);
+      setShowAnswer(false);
+      setCreateForm(null);
+      setError('');
     } catch {
       setError('Unable to save card to browser storage.');
-      return;
     }
-
-    setCards(updatedCards);
-    setIndex(updatedCards.length - 1);
-    setShowAnswer(false);
-    setCreateForm(null);
-    setError('');
   };
 
   const card = cards[index];
 
+  // ------------------------------------
+  // RENDER
+  // ------------------------------------
+
   return (
     <div className='flashcards'>
       <h2>Flashcards</h2>
+
       <button
         className='create-card-button'
         onClick={startCreating}
-        disabled={!!createForm || !!editForm}
+        disabled={isEditing}
       >
         + Add New Card
       </button>
@@ -318,10 +671,17 @@ function Flashcards() {
           type='file'
           accept='.json,application/json'
           onChange={importQuestions}
+          disabled={isEditing}
         />
       </label>
 
-      {error && <p className='error'>{error}</p>}
+      {error && (
+        <p className='error' role='alert'>
+          {error}
+        </p>
+      )}
+
+      {/* CREATE FORM */}
 
       {createForm && (
         <div className='create-card-form'>
@@ -331,10 +691,19 @@ function Flashcards() {
             Card Type
             <select
               value={createForm.type}
-              onChange={(e) => updateCreateField('type', e.target.value)}
+              onChange={(e) => {
+                setCreateForm((current) => ({
+                  ...current,
+                  type: e.target.value,
+                  correctAnswer: 'a',
+                }));
+              }}
             >
               <option value='definition'>Definition</option>
+
               <option value='multiple_choice'>Multiple Choice</option>
+
+              <option value='true_false'>True / False</option>
             </select>
           </label>
 
@@ -344,8 +713,8 @@ function Flashcards() {
                 Term
                 <input
                   type='text'
-                  placeholder='Example: Block perch'
                   value={createForm.term}
+                  placeholder='Example: Block perch'
                   onChange={(e) => updateCreateField('term', e.target.value)}
                 />
               </label>
@@ -354,7 +723,6 @@ function Flashcards() {
                 Definition
                 <textarea
                   rows={4}
-                  placeholder='Enter the definition...'
                   value={createForm.definition}
                   onChange={(e) =>
                     updateCreateField('definition', e.target.value)
@@ -368,7 +736,6 @@ function Flashcards() {
                 Question
                 <textarea
                   rows={3}
-                  placeholder='Enter your question...'
                   value={createForm.question}
                   onChange={(e) =>
                     updateCreateField('question', e.target.value)
@@ -376,40 +743,40 @@ function Flashcards() {
                 />
               </label>
 
-              <h4>Answer Choices</h4>
-
-              {Object.entries(createForm.options).map(([letter, value]) => (
-                <label key={letter}>
-                  Option {letter.toUpperCase()}
-                  <input
-                    type='text'
-                    value={value}
-                    onChange={(e) => updateCreateOption(letter, e.target.value)}
-                  />
+              {createForm.type === 'true_false' ? (
+                <label>
+                  Correct Answer
+                  <select
+                    value={createForm.correctAnswer}
+                    onChange={(e) =>
+                      updateCreateField('correctAnswer', e.target.value)
+                    }
+                  >
+                    <option value='a'>True</option>
+                    <option value='b'>False</option>
+                  </select>
                 </label>
-              ))}
-
-              <label>
-                Correct Answer
-                <select
-                  value={createForm.correctAnswer}
-                  onChange={(e) =>
-                    updateCreateField('correctAnswer', e.target.value)
+              ) : (
+                <AnswerChoicesEditor
+                  options={createForm.options}
+                  correctAnswer={createForm.correctAnswer}
+                  onOptionChange={(letter, value) =>
+                    updateAnswerChoice(setCreateForm, letter, value)
                   }
-                >
-                  {Object.keys(createForm.options).map((letter) => (
-                    <option key={letter} value={letter}>
-                      Option {letter.toUpperCase()}
-                    </option>
-                  ))}
-                </select>
-              </label>
+                  onAnswerChange={(value) =>
+                    updateCreateField('correctAnswer', value)
+                  }
+                  onAdd={() => addAnswerChoice(setCreateForm)}
+                  onRemove={(letter) =>
+                    removeAnswerChoice(setCreateForm, letter)
+                  }
+                />
+              )}
 
               <label>
                 Explanation (Optional)
                 <textarea
                   rows={4}
-                  placeholder='Explain why this is correct...'
                   value={createForm.explanation}
                   onChange={(e) =>
                     updateCreateField('explanation', e.target.value)
@@ -427,15 +794,70 @@ function Flashcards() {
         </div>
       )}
 
+      {/* FLASHCARD DISPLAY */}
+
       {cards.length === 0 ? (
-        <p>Import your falconry_questions.json to begin.</p>
+        <p>No flashcards yet. Add a card or import a JSON file to begin.</p>
       ) : (
         <>
           <div className='flashcard-progress'>
             Card {index + 1} of {cards.length}
           </div>
 
-          <div className='flashcard'>
+          {/* QUICK NAVIGATION */}
+
+          <div className='flashcard-quick-nav'>
+            <label
+              htmlFor='flashcard-slider'
+              className='flashcard-slider-label'
+            >
+              Quick Navigation
+            </label>
+
+            <input
+              id='flashcard-slider'
+              type='range'
+              min='0'
+              max={Math.max(0, cards.length - 1)}
+              value={index}
+              onChange={(e) => goToCard(Number(e.target.value))}
+              disabled={isEditing || cards.length < 2}
+            />
+
+            <div className='flashcard-jump-row'>
+              <form className='flashcard-jump-form' onSubmit={jumpToQuestion}>
+                <input
+                  type='number'
+                  inputMode='numeric'
+                  placeholder='Question #'
+                  aria-label='Question number'
+                  value={jumpQuestion}
+                  onChange={(e) => setJumpQuestion(e.target.value)}
+                  disabled={isEditing}
+                />
+
+                <button type='submit' disabled={isEditing}>
+                  Go
+                </button>
+              </form>
+
+              <button
+                type='button'
+                onClick={randomCard}
+                disabled={isEditing || cards.length < 2}
+              >
+                Random
+              </button>
+            </div>
+          </div>
+
+          {/* CARD */}
+
+          <div
+            className='flashcard'
+            onTouchStart={handleTouchStart}
+            onTouchEnd={handleTouchEnd}
+          >
             <small>Question #{card.id}</small>
 
             {!showAnswer ? (
@@ -446,15 +868,18 @@ function Flashcards() {
                     : card.question}
                 </h3>
 
-                {card.type === 'multiple_choice' && (
+                {(card.type === 'multiple_choice' ||
+                  card.type === 'true_false') && (
                   <div className='flashcard-options'>
-                    {Object.entries(card.options || {}).map(
-                      ([letter, option]) => (
-                        <p key={letter}>
-                          <strong>{letter.toUpperCase()}.</strong> {option}
-                        </p>
-                      ),
-                    )}
+                    {Object.entries(
+                      card.type === 'true_false'
+                        ? TRUE_FALSE_OPTIONS
+                        : card.options || {},
+                    ).map(([letter, option]) => (
+                      <p key={letter}>
+                        <strong>{letter.toUpperCase()}.</strong> {option}
+                      </p>
+                    ))}
                   </div>
                 )}
               </>
@@ -465,7 +890,10 @@ function Flashcards() {
                 <p>
                   {card.type === 'definition'
                     ? card.definition
-                    : card.correctAnswerText}
+                    : card.type === 'true_false'
+                      ? TRUE_FALSE_OPTIONS[trueFalseLetter(card)] ||
+                        card.correctAnswerText
+                      : card.correctAnswerText}
                 </p>
 
                 {card.explanation && (
@@ -475,45 +903,51 @@ function Flashcards() {
             )}
           </div>
 
+          {/* REVEAL ANSWER */}
+
           <button
             className='reveal-button'
             onClick={() => setShowAnswer(!showAnswer)}
+            disabled={isEditing}
           >
             {showAnswer ? 'Show Question' : 'Reveal Answer'}
           </button>
 
+          {/* PREVIOUS / NEXT */}
+
           <div className='flashcard-navigation'>
             <button
-              disabled={!!createForm || !!editForm || index === 0}
+              disabled={isEditing || index === 0}
               onClick={() => changeCard(-1)}
             >
               Previous
             </button>
 
             <button
-              disabled={
-                !!createForm || !!editForm || index === cards.length - 1
-              }
+              disabled={isEditing || index === cards.length - 1}
               onClick={() => changeCard(1)}
             >
               Next
             </button>
           </div>
+
           <button
             className='edit-card-button'
             onClick={startEditing}
-            disabled={!!editForm || !!createForm}
+            disabled={isEditing}
           >
             Edit Card
           </button>
+
           <button
-            // Delete Card
-            disabled={!!createForm || !!editForm}
             className='delete-card-button'
             onClick={deleteCard}
+            disabled={isEditing}
           >
             Delete Card
           </button>
+
+          {/* EDIT FORM */}
 
           {editForm && (
             <div className='edit-card-form'>
@@ -554,38 +988,37 @@ function Flashcards() {
                     />
                   </label>
 
-                  <h4>Answer Choices</h4>
+                  {editForm.type === 'true_false' ? (
+                    <label>
+                      Correct Answer
+                      <select
+                        value={editForm.correctAnswer || ''}
+                        onChange={(e) =>
+                          updateEditField('correctAnswer', e.target.value)
+                        }
+                      >
+                        <option value=''>Select answer</option>
 
-                  {Object.entries(editForm.options || {}).map(
-                    ([letter, option]) => (
-                      <label key={letter}>
-                        Option {letter.toUpperCase()}
-                        <input
-                          type='text'
-                          value={option}
-                          onChange={(e) => updateOption(letter, e.target.value)}
-                        />
-                      </label>
-                    ),
-                  )}
-
-                  <label>
-                    Correct Answer
-                    <select
-                      value={editForm.correctAnswer || ''}
-                      onChange={(e) =>
-                        updateEditField('correctAnswer', e.target.value)
+                        <option value='a'>True</option>
+                        <option value='b'>False</option>
+                      </select>
+                    </label>
+                  ) : (
+                    <AnswerChoicesEditor
+                      options={editForm.options}
+                      correctAnswer={editForm.correctAnswer}
+                      onOptionChange={(letter, value) =>
+                        updateAnswerChoice(setEditForm, letter, value)
                       }
-                    >
-                      <option value=''>Select answer</option>
-
-                      {Object.keys(editForm.options || {}).map((letter) => (
-                        <option key={letter} value={letter}>
-                          {letter.toUpperCase()}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
+                      onAnswerChange={(value) =>
+                        updateEditField('correctAnswer', value)
+                      }
+                      onAdd={() => addAnswerChoice(setEditForm)}
+                      onRemove={(letter) =>
+                        removeAnswerChoice(setEditForm, letter)
+                      }
+                    />
+                  )}
 
                   <label>
                     Explanation

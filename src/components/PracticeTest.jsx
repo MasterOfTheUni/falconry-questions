@@ -3,30 +3,98 @@ import { useState } from 'react';
 const QUESTIONS_KEY = 'falconry_questions';
 const TEST_HISTORY_KEY = 'falconry_test_history';
 
-// Load questions from localStorage.
+const TRUE_FALSE_OPTIONS = {
+  a: 'True',
+  b: 'False',
+};
+
+// -----------------------------------
+// QUESTION HELPERS
+// -----------------------------------
+
+// Get the answer choices for a question.
+function getOptions(question) {
+  if (question.type === 'true_false') {
+    return TRUE_FALSE_OPTIONS;
+  }
+
+  if (question.type === 'multiple_choice') {
+    return question.options || {};
+  }
+
+  return {};
+}
+
+// Resolve the correct answer to its option key.
+function getCorrectAnswer(question) {
+  if (question.type === 'true_false') {
+    const value = String(question.correctAnswer ?? '')
+      .trim()
+      .toLowerCase();
+
+    if (value === 'a' || value === 'true') {
+      return 'a';
+    }
+
+    if (value === 'b' || value === 'false') {
+      return 'b';
+    }
+
+    const answerText = String(question.correctAnswerText ?? '')
+      .trim()
+      .toLowerCase();
+
+    if (answerText === 'true') return 'a';
+    if (answerText === 'false') return 'b';
+
+    return null;
+  }
+
+  const options = getOptions(question);
+
+  const correctKey = Object.keys(options).find(
+    (key) =>
+      key.toLowerCase() === String(question.correctAnswer ?? '').toLowerCase(),
+  );
+
+  return correctKey || null;
+}
+
+// Load valid questions from browser storage.
 function loadQuestions() {
   try {
     const data = JSON.parse(localStorage.getItem(QUESTIONS_KEY) || '[]');
 
     if (!Array.isArray(data)) return [];
 
-    // Only include valid multiple-choice questions.
-    return data.filter((q) => {
+    return data.filter((question) => {
+      if (
+        question.id == null ||
+        !['multiple_choice', 'true_false'].includes(question.type) ||
+        !question.question?.trim()
+      ) {
+        return false;
+      }
+
+      const options = getOptions(question);
+      const correctAnswer = getCorrectAnswer(question);
+
       return (
-        q.type === 'multiple_choice' &&
-        q.id != null &&
-        q.question?.trim() &&
-        q.options &&
-        Object.keys(q.options).length >= 2 &&
-        q.options[q.correctAnswer]
+        Object.keys(options).length >= 2 &&
+        Object.values(options).every(
+          (value) => typeof value === 'string' && value.trim().length > 0,
+        ) &&
+        correctAnswer !== null &&
+        Boolean(options[correctAnswer])
       );
     });
-  } catch {
+  } catch (error) {
+    console.error('Unable to load questions:', error);
     return [];
   }
 }
 
-// Shuffle without changing the original array.
+// Fisher-Yates shuffle.
 function shuffleQuestions(questions) {
   const shuffled = [...questions];
 
@@ -39,6 +107,10 @@ function shuffleQuestions(questions) {
   return shuffled;
 }
 
+// -----------------------------------
+// PRACTICE TEST COMPONENT
+// -----------------------------------
+
 function PracticeTest() {
   const [questions] = useState(loadQuestions);
 
@@ -48,13 +120,21 @@ function PracticeTest() {
 
   const [answers, setAnswers] = useState({});
   const [results, setResults] = useState(null);
+
   const [showAllResults, setShowAllResults] = useState(false);
+
+  const [error, setError] = useState('');
 
   const currentQuestion = test[currentIndex];
 
-  const answeredCount = test.filter((q) => answers[q.id] !== undefined).length;
+  const answeredCount = test.filter(
+    (question) => answers[question.id] !== undefined,
+  ).length;
 
-  // Create a new randomized practice test.
+  // -----------------------------------
+  // START TEST
+  // -----------------------------------
+
   const startTest = () => {
     const shuffled = shuffleQuestions(questions);
 
@@ -68,38 +148,49 @@ function PracticeTest() {
     setAnswers({});
     setResults(null);
     setShowAllResults(false);
+    setError('');
   };
 
-  // Record the selected answer.
+  // -----------------------------------
+  // SELECT AN ANSWER
+  // -----------------------------------
+
   const selectAnswer = (letter) => {
+    if (!currentQuestion) return;
+
     setAnswers((previous) => ({
       ...previous,
       [currentQuestion.id]: letter,
     }));
   };
 
-  // Grade the completed test.
+  // -----------------------------------
+  // SUBMIT AND GRADE TEST
+  // -----------------------------------
+
   const submitTest = () => {
-    if (answeredCount !== test.length || !test.length) {
+    if (test.length === 0 || answeredCount !== test.length) {
       return;
     }
 
     const graded = test.map((question) => {
       const selectedAnswer = answers[question.id];
+      const correctAnswer = getCorrectAnswer(question);
 
       return {
         ...question,
         selectedAnswer,
-        isCorrect: selectedAnswer === question.correctAnswer,
+        correctAnswer,
+        isCorrect: selectedAnswer === correctAnswer,
       };
     });
 
-    const correct = graded.filter((q) => q.isCorrect).length;
+    const correct = graded.filter((question) => question.isCorrect).length;
 
-    const score = Math.round((correct / test.length) * 100);
+    const score = Math.round((correct / graded.length) * 100);
 
     const result = {
-      total: test.length,
+      total: graded.length,
       correct,
       score,
       questions: graded,
@@ -107,58 +198,76 @@ function PracticeTest() {
 
     setResults(result);
 
-    // Save test results for our future Progress screen.
+    // Save results for the Progress Dashboard.
+    const newEntry = {
+      date: new Date().toISOString(),
+      total: graded.length,
+      correct,
+      score,
+
+      missedIds: graded
+        .filter((question) => !question.isCorrect)
+        .map((question) => question.id),
+    };
+
     try {
-      const history = JSON.parse(
-        localStorage.getItem(TEST_HISTORY_KEY) || '[]',
+      const stored = JSON.parse(localStorage.getItem(TEST_HISTORY_KEY) || '[]');
+
+      const history = Array.isArray(stored) ? stored : [];
+
+      localStorage.setItem(
+        TEST_HISTORY_KEY,
+        JSON.stringify([...history, newEntry]),
       );
-
-      const newEntry = {
-        date: new Date().toISOString(),
-        total: test.length,
-        correct,
-        score,
-        missedIds: graded.filter((q) => !q.isCorrect).map((q) => q.id),
-      };
-
-      const updatedHistory = [
-        ...(Array.isArray(history) ? history : []),
-        newEntry,
-      ];
-
-      localStorage.setItem(TEST_HISTORY_KEY, JSON.stringify(updatedHistory));
     } catch (error) {
-      console.error('Could not save test history:', error);
+      console.error('Unable to save test history:', error);
+
+      setError('Test graded, but the results could not be saved.');
     }
   };
 
-  // Return to test setup.
+  // -----------------------------------
+  // RESET TEST
+  // -----------------------------------
+
   const resetTest = () => {
     setTest([]);
     setAnswers({});
     setResults(null);
     setCurrentIndex(0);
     setShowAllResults(false);
+    setError('');
   };
 
-  // -------------------------------
+  // -----------------------------------
   // TEST SETUP
-  // -------------------------------
+  // -----------------------------------
 
   if (test.length === 0) {
+    const multipleChoiceCount = questions.filter(
+      (q) => q.type === 'multiple_choice',
+    ).length;
+
+    const trueFalseCount = questions.filter(
+      (q) => q.type === 'true_false',
+    ).length;
+
     return (
       <div className='practice-test'>
         <h2>Practice Test</h2>
 
-        <p>
-          Test your falconry knowledge with randomly selected multiple-choice
-          questions.
-        </p>
+        <p>Test your falconry knowledge with randomly selected questions.</p>
 
         <div className='test-setup'>
           <h3>Start a Practice Exam</h3>
 
-          <p>{questions.length} multiple-choice questions available.</p>
+          <p>{questions.length} questions available</p>
+
+          <p>
+            {multipleChoiceCount} Multiple Choice
+            {' · '}
+            {trueFalseCount} True / False
+          </p>
 
           <label htmlFor='test-size'>Number of Questions</label>
 
@@ -170,6 +279,7 @@ function PracticeTest() {
             <option value='5'>5 Questions</option>
             <option value='10'>10 Questions</option>
             <option value='20'>20 Questions</option>
+            <option value='50'>50 Questions</option>
             <option value='all'>All Questions</option>
           </select>
 
@@ -183,8 +293,8 @@ function PracticeTest() {
 
           {questions.length === 0 && (
             <p>
-              No valid multiple-choice questions found. Import your questions in
-              Flashcards first.
+              No valid multiple-choice or True/False questions found. Add
+              questions in the Flashcards section first.
             </p>
           )}
         </div>
@@ -192,12 +302,12 @@ function PracticeTest() {
     );
   }
 
-  // -------------------------------
+  // -----------------------------------
   // TEST RESULTS
-  // -------------------------------
+  // -----------------------------------
 
   if (results) {
-    const missed = results.questions.filter((q) => !q.isCorrect);
+    const missed = results.questions.filter((question) => !question.isCorrect);
 
     const displayedQuestions = showAllResults ? results.questions : missed;
 
@@ -214,10 +324,16 @@ function PracticeTest() {
 
           <p>
             {results.score === 100
-              ? 'Perfect score! Excellent work!'
-              : 'Review the questions you missed below.'}
+              ? 'Perfect score!'
+              : 'Review your missed questions below.'}
           </p>
         </div>
+
+        {error && (
+          <p className='error' role='alert'>
+            {error}
+          </p>
+        )}
 
         <div className='test-result-controls'>
           <button onClick={() => setShowAllResults(!showAllResults)}>
@@ -229,38 +345,42 @@ function PracticeTest() {
           {displayedQuestions.length === 0 ? (
             <p>No missed questions!</p>
           ) : (
-            displayedQuestions.map((q) => (
-              <div
-                key={q.id}
-                className={`test-review-item ${
-                  q.isCorrect ? 'correct' : 'incorrect'
-                }`}
-              >
-                <strong>
-                  #{q.id} — {q.question}
-                </strong>
+            displayedQuestions.map((question) => {
+              const options = getOptions(question);
 
-                <p>
-                  Your answer:{' '}
-                  <span>
-                    {q.selectedAnswer.toUpperCase()}.{' '}
-                    {q.options[q.selectedAnswer]}
-                  </span>
-                </p>
-
-                <p>
-                  Correct answer:{' '}
+              return (
+                <div
+                  key={question.id}
+                  className={`test-review-item ${
+                    question.isCorrect ? 'correct' : 'incorrect'
+                  }`}
+                >
                   <strong>
-                    {q.correctAnswer.toUpperCase()}.{' '}
-                    {q.options[q.correctAnswer]}
+                    #{question.id} — {question.question}
                   </strong>
-                </p>
 
-                {q.explanation && (
-                  <p className='test-explanation'>{q.explanation}</p>
-                )}
-              </div>
-            ))
+                  <p>
+                    Your answer:{' '}
+                    <span>
+                      {question.selectedAnswer.toUpperCase()}.{' '}
+                      {options[question.selectedAnswer]}
+                    </span>
+                  </p>
+
+                  <p>
+                    Correct answer:{' '}
+                    <strong>
+                      {question.correctAnswer.toUpperCase()}.{' '}
+                      {options[question.correctAnswer]}
+                    </strong>
+                  </p>
+
+                  {question.explanation && (
+                    <p className='test-explanation'>{question.explanation}</p>
+                  )}
+                </div>
+              );
+            })
           )}
         </div>
 
@@ -271,9 +391,11 @@ function PracticeTest() {
     );
   }
 
-  // -------------------------------
+  // -----------------------------------
   // ACTIVE TEST
-  // -------------------------------
+  // -----------------------------------
+
+  const options = getOptions(currentQuestion);
 
   return (
     <div className='practice-test'>
@@ -296,12 +418,18 @@ function PracticeTest() {
       </div>
 
       <div className='test-question'>
-        <small>Question #{currentQuestion.id}</small>
+        <small>
+          Question #{currentQuestion.id}
+          {' · '}
+          {currentQuestion.type === 'true_false'
+            ? 'True / False'
+            : 'Multiple Choice'}
+        </small>
 
         <h3>{currentQuestion.question}</h3>
 
         <div className='test-options'>
-          {Object.entries(currentQuestion.options).map(([letter, option]) => (
+          {Object.entries(options).map(([letter, option]) => (
             <label
               key={letter}
               className={`test-option ${

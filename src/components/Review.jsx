@@ -5,7 +5,15 @@ const REVIEW_KEY = 'falconry_review_progress';
 
 const DAY = 24 * 60 * 60 * 1000;
 
-// Load saved flashcards
+const TRUE_FALSE_OPTIONS = {
+  a: 'True',
+  b: 'False',
+};
+
+// -----------------------------------
+// LOAD FLASHCARDS
+// -----------------------------------
+
 function loadCards() {
   try {
     const data = JSON.parse(localStorage.getItem(QUESTIONS_KEY) || '[]');
@@ -17,7 +25,10 @@ function loadCards() {
   }
 }
 
-// Load saved review history
+// -----------------------------------
+// LOAD REVIEW PROGRESS
+// -----------------------------------
+
 function loadProgress() {
   try {
     const data = JSON.parse(localStorage.getItem(REVIEW_KEY) || '{}');
@@ -29,7 +40,61 @@ function loadProgress() {
   }
 }
 
-// Find cards ready for review
+// -----------------------------------
+// QUESTION HELPERS
+// -----------------------------------
+
+// Get the options to display for a question.
+function getCardOptions(card) {
+  if (card.type === 'true_false') {
+    return TRUE_FALSE_OPTIONS;
+  }
+
+  if (card.type === 'multiple_choice') {
+    return card.options || {};
+  }
+
+  return {};
+}
+
+// Get the correct answer text.
+function getCardAnswer(card) {
+  if (card.type === 'definition') {
+    return card.definition;
+  }
+
+  if (card.type === 'true_false') {
+    const answer = String(card.correctAnswer ?? '').toLowerCase();
+
+    if (answer === 'a' || answer === 'true') {
+      return 'True';
+    }
+
+    if (answer === 'b' || answer === 'false') {
+      return 'False';
+    }
+
+    const answerText = String(card.correctAnswerText ?? '')
+      .trim()
+      .toLowerCase();
+
+    if (answerText === 'true') return 'True';
+    if (answerText === 'false') return 'False';
+
+    return card.correctAnswerText || 'Answer unavailable';
+  }
+
+  return (
+    card.correctAnswerText ||
+    card.options?.[card.correctAnswer] ||
+    'Answer unavailable'
+  );
+}
+
+// -----------------------------------
+// REVIEW QUEUE
+// -----------------------------------
+
 function getReviewQueue(cards, progress, onlyDue = true) {
   const now = Date.now();
 
@@ -48,6 +113,7 @@ function getReviewQueue(cards, progress, onlyDue = true) {
       return !Number.isFinite(dueTime) || dueTime <= now;
     })
     .sort((a, b) => {
+      // Cards previously marked Again appear first.
       const aMissed = progress[a.id]?.lastRating === 'again' ? 0 : 1;
 
       const bMissed = progress[b.id]?.lastRating === 'again' ? 0 : 1;
@@ -56,6 +122,10 @@ function getReviewQueue(cards, progress, onlyDue = true) {
     })
     .map((card) => card.id);
 }
+
+// -----------------------------------
+// REVIEW COMPONENT
+// -----------------------------------
 
 function Review() {
   const [cards] = useState(loadCards);
@@ -68,9 +138,12 @@ function Review() {
   const [mode, setMode] = useState('due');
   const [reviewedCount, setReviewedCount] = useState(0);
 
-  const card = cards.find((c) => c.id === queue[0]);
+  const card = cards.find((item) => item.id === queue[0]);
 
-  // Start a new review session
+  // -----------------------------------
+  // START REVIEW SESSION
+  // -----------------------------------
+
   const startSession = (newMode) => {
     setMode(newMode);
 
@@ -81,7 +154,10 @@ function Review() {
     setError('');
   };
 
-  // Calculate the next review interval
+  // -----------------------------------
+  // SPACED REPETITION
+  // -----------------------------------
+
   const calculateInterval = (rating, previousDays = 0) => {
     switch (rating) {
       case 'again':
@@ -101,7 +177,10 @@ function Review() {
     }
   };
 
-  // Save the review result
+  // -----------------------------------
+  // RATE CURRENT CARD
+  // -----------------------------------
+
   const rateCard = (rating) => {
     if (!card || !showAnswer) return;
 
@@ -138,7 +217,7 @@ function Review() {
     setProgress(updatedProgress);
     setReviewedCount((count) => count + 1);
 
-    // Put missed cards at the end of the queue
+    // Cards marked Again return to the end.
     setQueue((current) => {
       const remaining = current.slice(1);
 
@@ -153,6 +232,10 @@ function Review() {
     setError('');
   };
 
+  // -----------------------------------
+  // RENDER
+  // -----------------------------------
+
   return (
     <div className='review-page'>
       <h2>Review Flashcards</h2>
@@ -161,9 +244,11 @@ function Review() {
         Reveal each answer, then rate how well you remembered it.
       </p>
 
-      {/* Review Mode */}
+      {/* REVIEW MODES */}
+
       <div className='review-controls'>
         <button
+          type='button'
           className={mode === 'due' ? 'selected' : ''}
           onClick={() => startSession('due')}
         >
@@ -171,6 +256,7 @@ function Review() {
         </button>
 
         <button
+          type='button'
           className={mode === 'all' ? 'selected' : ''}
           onClick={() => startSession('all')}
         >
@@ -178,43 +264,56 @@ function Review() {
         </button>
       </div>
 
-      {error && <p className='error'>{error}</p>}
+      {error && (
+        <p className='error' role='alert'>
+          {error}
+        </p>
+      )}
 
       {cards.length === 0 ? (
         <p>
-          No flashcards found. Add or import your questions from the Flashcards
+          No flashcards found. Add or import questions from the Flashcards
           section first.
         </p>
       ) : !card ? (
+        /* SESSION COMPLETE */
+
         <div className='review-complete'>
-          <h3>🎉 You're all caught up!</h3>
+          <h3>Review Complete!</h3>
 
-          <p>You reviewed {reviewedCount} cards this session.</p>
+          <p>You submitted {reviewedCount} ratings this session.</p>
 
-          <button onClick={() => startSession('all')}>
+          <button type='button' onClick={() => startSession('all')}>
             Practice All Cards
           </button>
         </div>
       ) : (
         <>
-          {/* Review Progress */}
+          {/* REVIEW PROGRESS */}
+
           <div className='review-count'>{queue.length} cards remaining</div>
 
-          {/* Current Flashcard */}
+          {/* CURRENT CARD */}
+
           <div className='review-card'>
             <small>Question #{card.id}</small>
 
             {!showAnswer ? (
               <>
+                {/* QUESTION */}
+
                 <h3>
                   {card.type === 'definition'
                     ? `Define: ${card.term}`
                     : card.question}
                 </h3>
 
-                {card.type === 'multiple_choice' && (
+                {/* ANSWER CHOICES */}
+
+                {(card.type === 'multiple_choice' ||
+                  card.type === 'true_false') && (
                   <div className='review-options'>
-                    {Object.entries(card.options || {}).map(
+                    {Object.entries(getCardOptions(card)).map(
                       ([letter, option]) => (
                         <p key={letter}>
                           <strong>{letter.toUpperCase()}.</strong> {option}
@@ -226,13 +325,11 @@ function Review() {
               </>
             ) : (
               <>
+                {/* REVEALED ANSWER */}
+
                 <h3>Answer</h3>
 
-                <p className='review-answer'>
-                  {card.type === 'definition'
-                    ? card.definition
-                    : card.correctAnswerText}
-                </p>
+                <p className='review-answer'>{getCardAnswer(card)}</p>
 
                 {card.explanation && (
                   <p className='review-explanation'>{card.explanation}</p>
@@ -241,9 +338,11 @@ function Review() {
             )}
           </div>
 
-          {/* Reveal Answer */}
+          {/* REVEAL BUTTON */}
+
           {!showAnswer ? (
             <button
+              type='button'
               className='review-reveal'
               onClick={() => setShowAnswer(true)}
             >
@@ -253,20 +352,38 @@ function Review() {
             <>
               <p className='review-prompt'>How well did you remember?</p>
 
+              {/* REVIEW RATINGS */}
+
               <div className='review-rating-buttons'>
-                <button className='again' onClick={() => rateCard('again')}>
+                <button
+                  type='button'
+                  className='again'
+                  onClick={() => rateCard('again')}
+                >
                   Again
                 </button>
 
-                <button className='hard' onClick={() => rateCard('hard')}>
+                <button
+                  type='button'
+                  className='hard'
+                  onClick={() => rateCard('hard')}
+                >
                   Hard
                 </button>
 
-                <button className='good' onClick={() => rateCard('good')}>
+                <button
+                  type='button'
+                  className='good'
+                  onClick={() => rateCard('good')}
+                >
                   Good
                 </button>
 
-                <button className='easy' onClick={() => rateCard('easy')}>
+                <button
+                  type='button'
+                  className='easy'
+                  onClick={() => rateCard('easy')}
+                >
                   Easy
                 </button>
               </div>

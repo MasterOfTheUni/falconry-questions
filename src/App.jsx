@@ -8,12 +8,14 @@ import {
   FaChartBar,
   FaHome,
   FaFeather,
+  FaDatabase,
 } from 'react-icons/fa';
 
 import Flashcards from './components/Flashcards';
 import Review from './components/Review';
 import PracticeTest from './components/PracticeTest';
 import Progress from './components/Progress';
+import BackupRestore from './components/BackupRestore';
 
 const sections = [
   {
@@ -55,6 +57,9 @@ function App() {
       case 'progress':
         return <Progress />;
 
+      case 'backup':
+        return <BackupRestore />;
+
       default:
         return (
           <>
@@ -82,6 +87,20 @@ function App() {
                 );
               })}
             </div>
+            <button
+              className='dashboard-card'
+              style={{
+                width: '100%',
+                marginTop: 12,
+              }}
+              onClick={() => setPage('backup')}
+            >
+              <span className='card-icon'>
+                <FaDatabase />
+              </span>
+
+              <strong>Backup & Restore</strong>
+            </button>
           </>
         );
     }
