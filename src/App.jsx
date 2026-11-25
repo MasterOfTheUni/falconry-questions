@@ -259,46 +259,72 @@ function App() {
 
       <section className='deck-manager'>
         <div className='deck-manager-heading'>
-          <FaLayerGroup />
-          <h3>My Decks</h3>
+          <div className='deck-manager-title'>
+            <div className='deck-heading-icon'>
+              <FaLayerGroup />
+            </div>
+
+            <div>
+              <span className='deck-eyebrow'>YOUR LIBRARY</span>
+
+              <h3>Study decks</h3>
+            </div>
+          </div>
+
+          <span className='deck-count'>
+            {decks.length} {decks.length === 1 ? 'deck' : 'decks'}
+          </span>
         </div>
 
         <div className='deck-list'>
-          {decks.map((deck) => (
-            <button
-              key={deck.id}
-              type='button'
-              className={
-                'deck-option ' + (deck.id === activeDeckId ? 'selected' : '')
-              }
-              onClick={() => switchDeck(deck.id)}
-            >
-              <span className='deck-option-icon'>
-                <FaBookOpen />
-              </span>
+          {decks.map((deck) => {
+            const isActive = deck.id === activeDeckId;
 
-              <span className='deck-option-name'>{deck.name}</span>
+            return (
+              <button
+                key={deck.id}
+                type='button'
+                className={`deck-option ${isActive ? 'selected' : ''}`}
+                aria-pressed={isActive}
+                onClick={() => switchDeck(deck.id)}
+              >
+                <span className='deck-option-icon'>
+                  <FaBookOpen />
+                </span>
 
-              <span className='deck-option-status'>
-                {deck.id === activeDeckId ? 'Active' : 'Open'}
-              </span>
-            </button>
-          ))}
+                <span className='deck-option-copy'>
+                  <strong>{deck.name}</strong>
+
+                  <small>
+                    {isActive ? 'Currently studying' : 'Tap to switch decks'}
+                  </small>
+                </span>
+
+                <span className='deck-option-status'>
+                  {isActive ? 'Active' : 'Open'}
+                </span>
+              </button>
+            );
+          })}
         </div>
 
         <form className='deck-create-form' onSubmit={createDeck}>
-          <input
-            type='text'
-            placeholder='New deck name'
-            aria-label='New deck name'
-            maxLength={60}
-            value={newDeckName}
-            onChange={(event) => setNewDeckName(event.target.value)}
-          />
+          <label htmlFor='new-deck-name'>Create a new deck</label>
 
-          <button type='submit' disabled={!newDeckName.trim()}>
-            + Add
-          </button>
+          <div className='deck-create-row'>
+            <input
+              id='new-deck-name'
+              type='text'
+              placeholder='e.g. Hacking, Biology...'
+              maxLength={60}
+              value={newDeckName}
+              onChange={(event) => setNewDeckName(event.target.value)}
+            />
+
+            <button type='submit' disabled={!newDeckName.trim()}>
+              + Add
+            </button>
+          </div>
         </form>
 
         {deckError && (
@@ -390,12 +416,11 @@ function App() {
 
       <main className='content'>{renderPage()}</main>
 
-      <nav className='bottom-nav' aria-label='Main navigation'>
+      <nav className='bottom-nav'>
         <button
           type='button'
           className={page === 'home' ? 'active' : ''}
           onClick={() => setPage('home')}
-          aria-label='Home'
         >
           <FaHome />
           <span>Home</span>
@@ -410,7 +435,6 @@ function App() {
               type='button'
               className={page === section.id ? 'active' : ''}
               onClick={() => setPage(section.id)}
-              aria-label={section.title}
             >
               <Icon />
               <span>{section.title}</span>
